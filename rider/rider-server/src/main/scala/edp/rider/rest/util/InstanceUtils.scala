@@ -23,9 +23,14 @@ package edp.rider.rest.util
 
 import java.util.NoSuchElementException
 
+import com.alibaba.fastjson.{JSON, JSONObject}
 import edp.wormhole.ums.UmsDataSystem
 import edp.rider.common.RiderLogger
-import scala.tools.nsc.interpreter.session
+import edp.rider.RiderStarter.modules._
+import edp.rider.rest.persistence.entities._
+import edp.rider.rest.util.CommonUtils._
+
+import scala.concurrent.Await
 import scala.util.hashing.MurmurHash3._
 
 
@@ -45,7 +50,11 @@ object InstanceUtils extends RiderLogger {
 
   val http_url_ip_port_pattern = "http(s)?://(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\:\\d+)?(,(http(s)?://(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\:\\d+)?))*$".r.pattern
 
-  val http_host_ip_port_pattern = "http(s)?://(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])(\\:\\d+)?(,(http(s)?://(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])(\\:\\d+)?))$".r.pattern
+  val http_host_ip_port_pattern = "http(s)?://(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])(\\:\\d+)?(,(http(s)?://(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])(\\:\\d+)?))*$".r.pattern
+
+  val http_url_pattern = "http(s)?://(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\:\\d+)?(\\S)*$".r.pattern
+
+  val http_host_pattern = "http(s)?://(([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]*[a-zA-Z0-9])\\.)*([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9\\-]*[A-Za-z0-9])(\\:\\d+)?(\\S)*$".r.pattern
 
   val zk_node_ip_pattern = "(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\:\\d+(\\/(.)+)*(,((([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\:\\d+(\\/(.)+)*))*$".r.pattern
 
@@ -62,8 +71,8 @@ object InstanceUtils extends RiderLogger {
       UmsDataSystem.dataSystem(nsSys)
       true
     } catch {
-      case _: NoSuchElementException => {
-        riderLogger.info(s"checkSys: ${nsSys}")
+      case ex: NoSuchElementException => {
+        riderLogger.info(s"checkSys: ${nsSys}", ex)
         false
       }
 
@@ -74,8 +83,11 @@ object InstanceUtils extends RiderLogger {
 
     nsSys.toLowerCase match {
       case "mysql" | "oracle" | "postgresql" | "vertica" | "greenplum" => one_tcp_url_host_port_pattern.matcher(url).matches() || one_tcp_url_ip_port_pattern.matcher(url).matches()
-      case "kafka" | "redis" | "cassandra" | "kudu" => tcp_url_ip_port_pattern.matcher(url).matches() || tcp_url_host_port_pattern.matcher(url).matches()
+      case "kafka" | "redis" | "cassandra" | "kudu" | "clickhouse" | "rocketmq" => tcp_url_ip_port_pattern.matcher(url).matches() || tcp_url_host_port_pattern.matcher(url).matches()
+      //case "clickhouse" | "rocketmq" => one_tcp_url_host_port_pattern.matcher(url).matches() || one_tcp_url_ip_port_pattern.matcher(url).matches() | tcp_url_ip_port_pattern.matcher(url).matches() || tcp_url_host_port_pattern.matcher(url).matches()
       case "es" => http_url_ip_port_pattern.matcher(url).matches() || http_host_ip_port_pattern.matcher(url).matches() || one_tcp_url_host_port_pattern.matcher(url).matches() || one_tcp_url_ip_port_pattern.matcher(url).matches()
+      //case "http" => http_url_pattern.matcher(url).matches() || http_host_pattern.matcher(url).matches()
+      case "http" => http_url_ip_port_pattern.matcher(url).matches() || http_host_ip_port_pattern.matcher(url).matches()
       case "phoenix" => phoenix_zk_node_ip_pattern.matcher(url).matches() || phoenix_zk_node_host_pattern.matcher(url).matches()
       case "hbase" => zk_node_ip_pattern.matcher(url).matches() || zk_node_host_pattern.matcher(url).matches()
       case "mongodb" => tcp_url_ip_port_pattern.matcher(url).matches() || tcp_url_host_port_pattern.matcher(url).matches() || tcp_url_ip_pattern.matcher(url).matches() || tcp_url_host_pattern.matcher(url).matches()
@@ -89,11 +101,12 @@ object InstanceUtils extends RiderLogger {
 
   def getTip(nsSys: String, url: String): String = {
     nsSys.toLowerCase match {
-      case "mysql" | "oracle" | "postgresql" | "vertica" | "greenplum" => s"ip:port"
-      case "kafka" | "redis" | "cassandra" | "kudu" => s"ip:port list"
+      case "mysql" | "oracle" | "postgresql" | "vertica" | "greenplum" |"instances" => s"ip:port"
+      case "kafka" | "redis" | "cassandra" | "kudu" | "clickhouse" | "rocketmq" => s"ip:port list"
       case "phoenix" => "zk node list, localhost,localhost1,localhost2:2181/hbase"
       case "hbase" => s"zk node list"
       case "es" => s"sink: http url list, lookup: tcp url, ip:port"
+      case "http" => s"http/https url"
       case "mongodb" => s"ip[:port] list"
       case "parquet" => s"hdfs root path: hdfs://ip:port/test"
       case _ => s"ip:port"
@@ -101,4 +114,19 @@ object InstanceUtils extends RiderLogger {
   }
 
   def generateNsInstance(connUrl: String): String = stringHash(connUrl).toString
+
+  def getKafkaKerberosConfig(connConfig: String, defaultValue: Boolean): Boolean = {
+    if(null != connConfig && connConfig.nonEmpty) {
+      val configJson = JSON.parseObject(connConfig)
+      if (configJson.containsKey("kerberos")) {
+        configJson.getBoolean("kerberos")
+      } else defaultValue
+    } else defaultValue
+  }
+
+  def getKafkaDetailByInstanceId(id: Long): (String, Option[String]) = {
+    val instance = Await.result(instanceDal.findById(id), minTimeOut)
+    (instance.get.connUrl, instance.get.connConfig)
+  }
+
 }

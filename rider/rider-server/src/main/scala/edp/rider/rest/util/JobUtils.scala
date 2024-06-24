@@ -43,6 +43,7 @@ import edp.wormhole.util.config.{ConnectionConfig, KVConfig}
 import edp.wormhole.util.{DateUtils, FileUtils}
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.hadoop.security.UserGroupInformation
 
 import scala.collection.mutable.ListBuffer
 import scala.concurrent.Await
@@ -79,13 +80,29 @@ object JobUtils extends RiderLogger {
 
     val specialConfig =
       if (jobType != JobType.BACKFILL.toString) {
-        if (sinkConfig != "" && sinkConfig != null)
-          Some(base64byte2s(sinkConfig.trim.getBytes()))
+        if (sinkConfig != "" && sinkConfig != null && JSON.parseObject(sinkConfig).containsKey("sink_specific_config")) {
+          val sinkSpecConfig = JSON.parseObject(sinkConfig).getJSONObject("sink_specific_config")
+          val sinkConfigRe = new JSONObject().fluentPut("sink_specific_config", sinkSpecConfig)
+          Some(base64byte2s(sinkConfigRe.toString.trim.getBytes()))
+        }
         else None
       } else {
-        val topicConfig = new JSONObject().fluentPut("topic", db.nsDatabase)
-        val sinkSpecConfig = new JSONObject().fluentPut("sink_specific_config", topicConfig)
-        Some(base64byte2s(sinkSpecConfig.toString.trim.getBytes))
+        val sinkSpecConfig =
+          if (sinkConfig != "" && sinkConfig != null && JSON.parseObject(sinkConfig).containsKey("sink_specific_config")) {
+            JSON.parseObject(sinkConfig).getJSONObject("sink_specific_config")
+          } else {
+            new JSONObject()
+          }
+        if(!sinkSpecConfig.containsKey("kerberos")) {
+          val inputKafkaKerberos = InstanceUtils.getKafkaKerberosConfig(instance.connConfig.getOrElse(""), RiderConfig.kerberos.kafkaEnabled)
+          sinkSpecConfig.fluentPut("kerberos", inputKafkaKerberos)
+        }
+        if(!sinkSpecConfig.containsKey("sink_uid")) {
+          sinkSpecConfig.fluentPut("sink_uid", true)
+        }
+        sinkSpecConfig.fluentPut("topic", db.nsDatabase)
+        val sinkConfigRe = new JSONObject().fluentPut("sink_specific_config", sinkSpecConfig)
+        Some(base64byte2s(sinkConfigRe.toString.trim.getBytes))
       }
 
     val sinkKeys = if (ns.nsSys == "hbase") Some(FlowUtils.getRowKey(specialConfig.get)) else tableKeys
@@ -269,8 +286,9 @@ object JobUtils extends RiderLogger {
     val projectNsSeq = modules.relProjectNsDal.getNsByProjectId(job.projectId)
     val nsSeq = new ListBuffer[String]
     val sorceNsSeq = job.sourceNs.split("\\.")
+    val sinkNsSeq = job.sinkNs.split("\\.")
     nsSeq += sorceNsSeq(0) + "." + sorceNsSeq(1) + "." + sorceNsSeq(2) + "." + sorceNsSeq(3) + ".*" + ".*" + ".*"
-    nsSeq += job.sinkNs
+    nsSeq += sinkNsSeq(0) + "." + sinkNsSeq(1) + "." + sinkNsSeq(2) + "." + sinkNsSeq(3) + ".*" + ".*" + ".*"
     var flag = true
     for (i <- nsSeq.indices) {
       if (!projectNsSeq.exists(_.startsWith(nsSeq(i))))
@@ -312,7 +330,7 @@ object JobUtils extends RiderLogger {
     }
     val configuration = setConfiguration(hdfsRoot, None)
     val names = namespace.split("\\.")
-    val hdfsPath = hdfsRoot + "/hdfslog/" + names(0) + "." + names(1) + "." + names(2) + "/" + names(3)
+    val hdfsPath = hdfsRoot + "/hdfslog/" + names(0).toLowerCase + "." + names(1).toLowerCase + "." + names(2).toLowerCase + "/" + names(3).toLowerCase
     val hdfsFileList = getHdfsFileList(configuration, hdfsPath)
     if (hdfsFileList != null) hdfsFileList.map(t => t.substring(t.lastIndexOf("/") + 1).toInt).sortWith(_ > _).mkString(",")
     else ""
@@ -322,8 +340,16 @@ object JobUtils extends RiderLogger {
     val fileSystem = FileSystem.newInstance(config)
     val fullPath = FileUtils.pfRight(hdfsPath)
     riderLogger.info(s"hdfs data path: $fullPath")
-    if (isPathExist(config, fullPath)) fileSystem.listStatus(new Path(fullPath)).map(_.getPath.toString).toList
-    else null
+
+//    if(RiderConfig.kerberos.kafkaEnabled) {
+//      UserGroupInformation.setConfiguration(config)
+//      UserGroupInformation.loginUserFromKeytab(RiderConfig.kerberos.sparkPrincipal, RiderConfig.kerberos.sparkKeyTab)
+//    }
+    val fileList =
+      if (isPathExist(config, fullPath)) fileSystem.listStatus(new Path(fullPath)).map(_.getPath.toString).toList
+      else null
+    fileSystem.close()
+    fileList
   }
 
   def setConfiguration(hdfsPath: String, connectionConfig: Option[Seq[KVConfig]]): Configuration = {
@@ -345,6 +371,11 @@ object JobUtils extends RiderLogger {
     val hdfsPathGrp = hdfsPath.split("//")
     val hdfsRoot = if (hdfsPathGrp(1).contains("/")) hdfsPathGrp(0) + "//" + hdfsPathGrp(1).substring(0, hdfsPathGrp(1).indexOf("/")) else hdfsPathGrp(0) + "//" + hdfsPathGrp(1)
     configuration.set("fs.defaultFS", hdfsRoot)
+
+//    if(RiderConfig.kerberos.kafkaEnabled) {
+//      configuration.set("hadoop.security.authentication", "kerberos")
+//    }
+
     configuration.setBoolean("fs.hdfs.impl.disable.cache", true)
     //configuration.set("fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem")
     if (sourceNamenodeHosts != null) {

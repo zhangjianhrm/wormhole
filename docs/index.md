@@ -87,11 +87,10 @@ Please refer to [Wormhole用户手册](https://edp963.github.io/wormhole).
 
 ## Latest Release
 
-Please download the latest RELEASE(链接:https://pan.baidu.com/s/1qQQMfHyTEiq6QaMA-IKxaQ  密码:skc0).
+Please download the latest RELEASE(链接:https://pan.baidu.com/s/1cJqlTKdeudkqY-vD4F8cqQ  密码:mhq4).
 
 ## Get Help
 
-- **Mailing list**: edp_support@groups.163.com
 - **WeChat**: edpstack <img src="https://github.com/edp963/edp-resource/raw/master/WeChat.jpg" alt="" width="100"/>
 
 ## License

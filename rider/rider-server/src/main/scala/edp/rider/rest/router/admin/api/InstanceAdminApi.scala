@@ -63,7 +63,7 @@ class InstanceAdminApi(instanceDal: InstanceDal) extends BaseAdminApiImpl(instan
                     onComplete(instanceDal.findByFilter(_.connUrl === conn_url).mapTo[Seq[Instance]]) {
                       case Success(instances) =>
                         if (instances.isEmpty) {
-                          if (checkFormat(sys, url)) {
+                          if (checkSys(sys) && checkFormat(sys, url)) {
                             riderLogger.info(s"user ${session.userId} check instance url $url doesn't exist, and fits the url format.")
                             complete(OK, ResponseJson[String](getHeader(200, session), url))
                           }
@@ -141,7 +141,7 @@ class InstanceAdminApi(instanceDal: InstanceDal) extends BaseAdminApiImpl(instan
               else {
                 if (namePattern.matcher(simple.nsInstance).matches()) {
                   if (checkSys(simple.nsSys) && checkFormat(simple.nsSys, simple.connUrl)) {
-                    val instance = Instance(0, simple.nsInstance.trim, simple.desc, simple.nsSys.trim, simple.connUrl.trim, active = true, currentSec, session.userId, currentSec, session.userId)
+                    val instance = Instance(0, simple.nsInstance.trim, simple.desc, simple.nsSys.trim, simple.connUrl.trim, simple.connConfig, active = true, currentSec, session.userId, currentSec, session.userId)
                     onComplete(instanceDal.insert(instance).mapTo[Instance]) {
                       case Success(row) =>
                         riderLogger.info(s"user ${session.userId} inserted instance $row success.")
@@ -183,8 +183,8 @@ class InstanceAdminApi(instanceDal: InstanceDal) extends BaseAdminApiImpl(instan
               }
               else {
                 if (namePattern.matcher(instance.nsInstance).matches()) {
-                  if (checkFormat(instance.nsSys, instance.connUrl)) {
-                    val instanceUpdate = Instance(instance.id, instance.nsInstance.trim, instance.desc, instance.nsSys.trim, instance.connUrl.trim, instance.active, instance.createTime, instance.createBy, currentSec, session.userId)
+                  if (checkSys(instance.nsSys) && checkFormat(instance.nsSys, instance.connUrl)) {
+                    val instanceUpdate = Instance(instance.id, instance.nsInstance.trim, instance.desc, instance.nsSys.trim, instance.connUrl.trim, instance.connConfig, instance.active, instance.createTime, instance.createBy, currentSec, session.userId)
                     onComplete(instanceDal.update(instanceUpdate).mapTo[Int]) {
                       case Success(_) =>
                         riderLogger.info(s"user ${session.userId} update instance success.")

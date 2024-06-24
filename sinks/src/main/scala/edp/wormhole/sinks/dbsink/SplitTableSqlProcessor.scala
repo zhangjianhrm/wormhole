@@ -273,7 +273,7 @@ class SplitTableSqlProcessor(sinkProcessConfig: SinkProcessConfig, schemaMap: co
 
     val errorTupleList = specialExecuteSql(tupleList, masterSql, subSql)
     val errorTuple2List = specialExecuteSql(errorTupleList, masterSql, subSql, 1)
-    if (errorTuple2List.nonEmpty) errorTuple2List.foreach(data => logger.error("opType:" + opType + ",data:" + data))
+    if (errorTuple2List.nonEmpty) logger.error("opType:" + opType + ",data:" + errorTuple2List.head)
     errorTuple2List
   }
 
@@ -342,6 +342,7 @@ class SplitTableSqlProcessor(sinkProcessConfig: SinkProcessConfig, schemaMap: co
       conn.setAutoCommit(false)
       logger.info(s"@write list.size:${tupleList.length} masterSql $masterSql")
       logger.info(s"@write list.size:${tupleList.length} subSql $subSql")
+
       tupleList.foreach(tuples => {
         try {
           psMaster = conn.prepareStatement(masterSql)

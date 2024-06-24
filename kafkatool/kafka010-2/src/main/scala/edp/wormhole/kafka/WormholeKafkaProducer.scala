@@ -22,9 +22,10 @@
 package edp.wormhole.kafka
 
 import java.util.Properties
+import java.util.concurrent.Future
 
 import edp.wormhole.util.config.KVConfig
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord, RecordMetadata}
 import org.apache.log4j.Logger
 
 import scala.collection.mutable
@@ -41,6 +42,17 @@ object WormholeKafkaProducer extends Serializable {
     props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
     props.put("acks", "all")
     props.put("compression.type", "lz4")
+    props.put("max.request.size", 10485760.toString)
+    props
+  }
+
+  private def getProducerPropsWithoutAcksAll: Properties = {
+    val props = new Properties()
+    props.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer")
+    props.put("acks", "1")
+    props.put("compression.type", "lz4")
+    props.put("max.request.size", 10485760.toString)
     props
   }
 
@@ -50,6 +62,30 @@ object WormholeKafkaProducer extends Serializable {
       synchronized {
         if (!producerMap.contains(brokers) || producerMap(brokers) == null) {
           val props = getProducerProps
+          if (kvConfig.nonEmpty) {
+            kvConfig.get.foreach(kv => {
+              props.put(kv.key, kv.value)
+            })
+          }
+
+          if (kerberos) {
+            props.put("security.protocol", "SASL_PLAINTEXT")
+            props.put("sasl.kerberos.service.name", "kafka")
+          }
+
+          props.put("bootstrap.servers", brokers)
+          producerMap(brokers) = new KafkaProducer[String, String](props)
+        }
+      }
+    }
+  }
+
+  def initWithoutAcksAll(brokers: String, kvConfig: Option[Seq[KVConfig]], kerberos: Boolean = false): Unit = {
+
+    if (!producerMap.contains(brokers) || producerMap(brokers) == null) {
+      synchronized {
+        if (!producerMap.contains(brokers) || producerMap(brokers) == null) {
+          val props = getProducerPropsWithoutAcksAll
           if (kvConfig.nonEmpty) {
             kvConfig.get.foreach(kv => {
               props.put(kv.key, kv.value)
@@ -105,30 +141,40 @@ object WormholeKafkaProducer extends Serializable {
         producerMap(brokers).close()
       producerMap -= brokers
     } catch {
-      case e: Throwable => println("close - ERROR", e)
+      case e: Throwable => logger.error("close - ERROR", e)
     }
 
   private def getProducer(brokers: String): KafkaProducer[String, String] = {
-    producerMap(brokers)
+    val kafkaProducer = producerMap(brokers)
+    if(null == kafkaProducer) {
+      logger.error(s"get kafkaProducer failed, producerMap not contain $brokers")
+    }
+    kafkaProducer
   }
 
   private def sendInternal(topic: String, message: String, key: Option[String], brokers: String) =
     if (message != null) {
       try {
         if (key.isDefined) {
-          getProducer(brokers).send(new ProducerRecord[String, String](topic, key.get, message))
+          //logger.info("kafka send message with key")
+          val future = getProducer(brokers).send(new ProducerRecord[String, String](topic, key.get, message))
+          future.get()
         } else {
-          getProducer(brokers).send(new ProducerRecord[String, String](topic, message))
+          //logger.info("kafka send message without key")
+          val future = getProducer(brokers).send(new ProducerRecord[String, String](topic, message))
+          future.get()
         }
       } catch {
         case e: Throwable =>
-          println("sendInternal - send ERROR:", e)
+          logger.error("sendInternal - send ERROR:", e)
           try {
             close(brokers)
           } catch {
-            case closeError: Throwable => println("sendInternal - close ERROR,", closeError)
+            case closeError: Throwable =>
+              logger.error("sendInternal - close ERROR,", closeError)
+              producerMap -= brokers
           }
-          producerMap = null
+          //producerMap = null
           throw e
       }
     }
@@ -137,19 +183,23 @@ object WormholeKafkaProducer extends Serializable {
     if (message != null) {
       try {
         if (key.isDefined) {
-          getProducer(brokers).send(new ProducerRecord[String, String](topic, partition, key.get, message))
+          val future = getProducer(brokers).send(new ProducerRecord[String, String](topic, partition, key.get, message))
+          future.get()
         } else {
-          getProducer(brokers).send(new ProducerRecord[String, String](topic, partition, null, message))
+          val future = getProducer(brokers).send(new ProducerRecord[String, String](topic, partition, null, message))
+          future.get()
         }
       } catch {
         case e: Throwable =>
-          println("sendInternal - send ERROR:", e)
+          logger.error("sendInternal - send ERROR:", e)
           try {
             close(brokers)
           } catch {
-            case closeError: Throwable => println("sendInternal - close ERROR,", closeError)
+            case closeError: Throwable =>
+              logger.error("sendInternal - close ERROR,", closeError)
+              producerMap -= brokers
           }
-          producerMap = null
+          //producerMap = null
           throw e
       }
     }

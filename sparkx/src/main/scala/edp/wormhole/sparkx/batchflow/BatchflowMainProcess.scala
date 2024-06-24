@@ -41,7 +41,7 @@ import edp.wormhole.sparkx.memorystorage.{ConfMemoryStorage, FlowConfig}
 import edp.wormhole.sparkx.spark.log.EdpLogging
 import edp.wormhole.sparkx.swifts.transform.SwiftsTransform
 import edp.wormhole.sparkx.swifts.validity.{ValidityAgainstAction, ValidityCheckRule}
-import edp.wormhole.sparkxinterface.swifts.{SwiftsProcessConfig, ValidityConfig}
+import edp.wormhole.sparkxinterface.swifts._
 import edp.wormhole.swifts.ConnectionMemoryStorage
 import edp.wormhole.ums.UmsFieldType.UmsFieldType
 import edp.wormhole.ums.UmsProtocolType.UmsProtocolType
@@ -49,12 +49,13 @@ import edp.wormhole.ums._
 import edp.wormhole.util.{DateUtils, DtFormat, JsonUtils}
 import org.apache.hadoop.conf.Configuration
 import org.apache.kafka.clients.consumer.ConsumerRecord
+import org.apache.kafka.common.KafkaException
 import org.apache.spark.HashPartitioner
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, _}
+import org.apache.spark.streaming.StreamingContext
 import org.apache.spark.streaming.kafka010.{CanCommitOffsets, HasOffsetRanges, OffsetRange, WormholeDirectKafkaInputDStream}
-import org.joda.time.DateTime
 
 import scala.collection.mutable
 import scala.collection.mutable.{ArrayBuffer, ListBuffer}
@@ -63,10 +64,11 @@ import scala.language.postfixOps
 object BatchflowMainProcess extends EdpLogging {
 
   def process(stream: WormholeDirectKafkaInputDStream[String, String], config: WormholeConfig, kafkaInput: KafkaInputConfig, session: SparkSession,
-              appId: String): Unit = {
+              appId: String,ssc: StreamingContext): Unit = {
     var zookeeperFlag = false
+    val kafkaKeyConfig = SparkxUtils.getKafkaKeyConfig(config.special_config)
     stream.foreachRDD((streamRdd: RDD[ConsumerRecord[String, String]]) => {
-      WormholeKafkaProducer.init(config.kafka_output.brokers, config.kafka_output.config, config.kerberos)
+      WormholeKafkaProducer.initWithoutAcksAll(config.kafka_output.brokers, config.kafka_output.config, config.kafka_output.kerberos)
 
       val offsetInfo: ArrayBuffer[OffsetRange] = getOffsets(streamRdd)
       val topicPartitionOffset = SparkUtils.getTopicPartitionOffset(offsetInfo)
@@ -83,11 +85,15 @@ object BatchflowMainProcess extends EdpLogging {
         BatchflowDirective.doDirectiveTopic(config, stream)
 
         logInfo("start Repartition")
-
-        val dataRepartitionRdd: RDD[(String, String)] = if (config.rdd_partition_number != -1) streamRdd.map(row => {
-          (UmsCommonUtils.checkAndGetKey(row.key, row.value), row.value)
-        }).repartition(config.rdd_partition_number) else streamRdd.map(row => {
-          (UmsCommonUtils.checkAndGetKey(row.key, row.value), row.value)
+        val sourceNamespaceSet = ConfMemoryStorage.getAllMainNamespaceSet
+        val dataRepartitionRdd: RDD[(String, String)] =
+          if (config.rdd_partition_number != -1) streamRdd.map(row => {
+          val rowKey = SparkxUtils.getDefaultKey(row.key, row.topic(), sourceNamespaceSet, kafkaKeyConfig)
+          (UmsCommonUtils.checkAndGetKey(rowKey, row.value), row.value)
+        }).repartition(config.rdd_partition_number)
+        else streamRdd.map(row => {
+          val rowKey = SparkxUtils.getDefaultKey(row.key, row.topic(), sourceNamespaceSet, kafkaKeyConfig)
+          (UmsCommonUtils.checkAndGetKey(rowKey, row.value), row.value)
         })
         UdfDirective.registerUdfProcess(config.kafka_output.feedback_topic_name, config.kafka_output.brokers, session)
 
@@ -111,20 +117,46 @@ object BatchflowMainProcess extends EdpLogging {
         SparkxUtils.printTopicPartitionOffset(offsetInfo, config.kafka_output.feedback_topic_name, config, batchId)
 
         classifyRdd.unpersist()
+
       } catch {
+        case e: KafkaException=>
+          logError("kafka consumer error,"+e.getMessage, e)
+          if(e.getMessage.contains("Failed to construct kafka consumer")){
+            logError("kafka consumer error ,stop spark streaming")
+
+            try {
+              SparkxUtils.setFlowErrorMessage(List.empty[String],
+                topicPartitionOffset, config, "testkerberos", "testkerberos", -1,
+                e, batchId, UmsProtocolType.DATA_BATCH_DATA.toString + "," + UmsProtocolType.DATA_INCREMENT_DATA.toString + "," + UmsProtocolType.DATA_INITIAL_DATA.toString,
+                -config.spark_config.stream_id, ErrorPattern.StreamError)
+            } catch {
+              case e: Exception =>
+                logAlert("send flow error message failed", e)
+            }
+
+            stream.stop()
+
+            throw e
+          }
+
         case e: Throwable =>
           logAlert("batch error", e)
 
-          //          String, mutable.LinkedHashMap[String, FlowConfig]
-          ConfMemoryStorage.getDefaultMap.foreach { case (sourceNamespace, sinks) =>
-            sinks.foreach { case (sinkNamespace, flowConfig) =>
-              SparkxUtils.setFlowErrorMessage(flowConfig.incrementTopics,
-                topicPartitionOffset, config, sourceNamespace, sinkNamespace, -1,
-                e, batchId, UmsProtocolType.DATA_BATCH_DATA.toString + "," + UmsProtocolType.DATA_INCREMENT_DATA.toString + "," + UmsProtocolType.DATA_INITIAL_DATA.toString,
-                flowConfig.flowId, ErrorPattern.StreamError)
+          try {
+            ConfMemoryStorage.getDefaultMap.foreach { case (sourceNamespace, sinks) =>
+              sinks.foreach { case (sinkNamespace, flowConfig) =>
+                SparkxUtils.setFlowErrorMessage(flowConfig.incrementTopics,
+                  topicPartitionOffset, config, sourceNamespace, sinkNamespace, -1,
+                  e, batchId, UmsProtocolType.DATA_BATCH_DATA.toString + "," + UmsProtocolType.DATA_INCREMENT_DATA.toString + "," + UmsProtocolType.DATA_INITIAL_DATA.toString,
+                  flowConfig.flowId, ErrorPattern.StreamError)
+              }
             }
+          } catch {
+            case e: Exception =>
+              logAlert("send flow error message failed", e)
           }
       }
+      logInfo("commit offsets")
       stream.asInstanceOf[CanCommitOffsets].commitAsync(offsetInfo.toArray)
       if (!zookeeperFlag) {
         logInfo("write appid to zookeeper," + appId)
@@ -142,6 +174,7 @@ object BatchflowMainProcess extends EdpLogging {
     val streamLookupNamespaceSet = ConfMemoryStorage.getAllLookupNamespaceSet
     val mainNamespaceSet = ConfMemoryStorage.getAllMainNamespaceSet
     val jsonSourceParseMap: Map[(UmsProtocolType, String), (Seq[UmsField], Seq[FieldInfo], ArrayBuffer[(String, String)])] = ConfMemoryStorage.getAllSourceParseMap
+    //log.info(s"streamLookupNamespaceSet: $streamLookupNamespaceSet, mainNamespaceSet $mainNamespaceSet, jsonSourceParseMap $jsonSourceParseMap")
     dataRepartitionRdd.mapPartitions(partition => {
       val mainDataList = ListBuffer.empty[((UmsProtocolType, String), Seq[UmsTuple])]
       val lookupDataList = ListBuffer.empty[((UmsProtocolType, String), Seq[UmsTuple])]
@@ -275,6 +308,19 @@ object BatchflowMainProcess extends EdpLogging {
           if (isProcessed) {
             val sinkNamespace = flow._1
             logInfo(uuid + ",do flow,matchSourceNamespace:" + matchSourceNamespace + ",sinkNamespace:" + sinkNamespace)
+
+            //set session conf
+            /*val originalNamespace = new JSONObject()
+            originalNamespace.fluentPut("sourceNamespace", sourceNamespace)
+            originalNamespace.fluentPut("sinkNamespace", sinkNamespace)
+            val originalNamespaceString = originalNamespace.toJSONString
+            session.sessionState.conf.setConfString(originalNamespaceString, originalNamespaceString)
+            if(session.sessionState.conf.contains(originalNamespaceString)) {
+              log.info(s"original_namespace is ${session.sessionState.conf.getConfString(originalNamespaceString)}")
+            } else {
+              log.info("original_namespace not set")
+            }*/
+
             val swiftsTs = DateUtils.dt2string(DateUtils.currentDateTime, DtFormat.TS_DASH_MILLISEC)
             ConfMemoryStorage.setEventTs(matchSourceNamespace, sinkNamespace, minTs)
             //            val (swiftsProcessConfig: Option[SwiftsProcessConfig], sinkProcessConfig, _, _, _, _) = flow._2
@@ -296,9 +342,28 @@ object BatchflowMainProcess extends EdpLogging {
             }
 
             val sinkTs = DateUtils.dt2string(DateUtils.currentDateTime, DtFormat.TS_DASH_MILLISEC)
+
+            //get session namespace config
+            val namespaceConfigKey = sourceNamespace + "&" + sinkNamespace
+            val newSourceNamespace = if(session.sessionState.conf.contains(namespaceConfigKey)) {
+              val namespaceConfigValue = session.sessionState.conf.getConfString(namespaceConfigKey)
+              if(!namespaceConfigValue.isEmpty) {
+                val processedSourceNs = JSON.parseObject(namespaceConfigValue).getString("sourceNamespace")
+                log.info(s"namespace Config Key $namespaceConfigKey, namespace Config value $namespaceConfigValue, processed source namespace: $processedSourceNs")
+                processedSourceNs
+              }
+              else {
+                log.info(s"namespace Config Key $namespaceConfigKey, namespace Config value $namespaceConfigValue")
+                sourceNamespace
+              }
+            } else sourceNamespace
+            if(newSourceNamespace != sourceNamespace) {
+              log.info(s"original source namespace is sourceNamespace, new source namespace is $newSourceNamespace")
+            }
+
             if (sinkRDD != null) {
               try {
-                validityAndSinkProcess(protocolType, sourceNamespace, sinkNamespace, session, sinkRDD, sinkFields, afterUnionDf, swiftsProcessConfig, sinkProcessConfig, config, minTs, maxTs, uuid) //,jsonUmsSysFields)
+                validityAndSinkProcess(protocolType, newSourceNamespace, sinkNamespace, session, sinkRDD, sinkFields, afterUnionDf, swiftsProcessConfig, sinkProcessConfig, config, minTs, maxTs, uuid) //,jsonUmsSysFields)
               }
               catch {
                 case e: Throwable =>
@@ -374,16 +439,16 @@ object BatchflowMainProcess extends EdpLogging {
     val matchSourceNamespace = ConfMemoryStorage.getMatchSourceNamespaceRule(sourceNamespace)
     val sourceDf = createSourceDf(session, sourceNamespace, umsFields, sourceTupleRDD)
     val dataSetShow = swiftsProcessConfig.get.datasetShow
-    if (dataSetShow.get) {
-      sourceDf.show(swiftsProcessConfig.get.datasetShowNum.get)
-    }
-
     val afterUnionDf = unionParquetNonTimeoutDf(swiftsProcessConfig, uuid, session, sourceDf, config, sourceNamespace, sinkNamespace).cache
-
     try {
+      if (dataSetShow.get) {
+        sourceDf.show(swiftsProcessConfig.get.datasetShowNum.get)
+      }
       val swiftsDf: DataFrame = SwiftsTransform.transform(session, sourceNamespace, sinkNamespace, afterUnionDf, matchSourceNamespace, config)
       val resultSchema = swiftsDf.schema
-      val nameIndex: Array[(String, Int, DataType)] = resultSchema.fieldNames.map(name => (name, resultSchema.fieldIndex(name), resultSchema.apply(resultSchema.fieldIndex(name)).dataType)).sortBy(_._2)
+      val nameIndex: Array[(String, Int, DataType)] = resultSchema.fieldNames.map(name => {
+        (name, resultSchema.fieldIndex(name), resultSchema.apply(resultSchema.fieldIndex(name)).dataType)
+      }).sortBy(_._2)
 
       import session.implicits._
 
@@ -420,10 +485,17 @@ object BatchflowMainProcess extends EdpLogging {
       case ((protocol, ns), schema) =>
         if (!schemaMap.contains((protocol, ns))) {
           val matchSourceNs = ConfMemoryStorage.getMatchSourceNamespaceRule(ns)
-          val directiveId = ConfMemoryStorage.getFlowConfigMap(matchSourceNs).head._2.directiveId
-          schemaMap((protocol, ns)) = (schema, directiveId)
+          if(null != matchSourceNs) {
+            val priorityId = ConfMemoryStorage.getFlowConfigMap(matchSourceNs).head._2.priorityId
+            schemaMap((protocol, ns)) = (schema, priorityId)
+          } else {
+            val matchLookupNamespace = ConfMemoryStorage.getMatchLookupNamespaceRule(ns)
+            if(null != matchLookupNamespace) {
+              schemaMap((protocol, ns)) = (schema, 0L)
+            }
+          }
         }
-        logInfo(s"begin schema:$schema")
+        logInfo(s"begin schema: $schema")
     })
     mutable.LinkedHashMap(schemaMap.toSeq.sortBy(_._2._2): _*)
   }
@@ -472,7 +544,7 @@ object BatchflowMainProcess extends EdpLogging {
 
     val mutationType =
       if (specialConfigJson.containsKey("mutation_type")) specialConfigJson.getString("mutation_type").trim
-      else if (sinkProcessConfig.classFullname.contains("Kafka")) SourceMutationType.INSERT_ONLY.toString
+      else if (sinkProcessConfig.classFullname.contains("Kafka") || sinkProcessConfig.classFullname.contains("Clickhouse") || sinkProcessConfig.classFullname.contains("RocketMQ") || sinkProcessConfig.classFullname.contains("Http")) SourceMutationType.INSERT_ONLY.toString
       else SourceMutationType.I_U_D.toString
 
     val repartitionRDD = if (SourceMutationType.INSERT_ONLY.toString != mutationType) {
@@ -598,7 +670,6 @@ object BatchflowMainProcess extends EdpLogging {
     (sendList, saveList)
   }
 
-
   private def streamJoinTimeoutProcess(matchSourceNamespace: String,
                                        sinkNamespace: String,
                                        config: WormholeConfig,
@@ -668,7 +739,7 @@ object BatchflowMainProcess extends EdpLogging {
                     if (!processedSourceNamespace(namespace)) {
                       val currentTs = DateUtils.dt2string(DateUtils.currentDateTime, DtFormat.TS_DASH_MILLISEC)
                       WormholeKafkaProducer.sendMessage(config.kafka_output.feedback_topic_name, FeedbackPriority.feedbackPriority,
-                        UmsProtocolUtils.feedbackFlowStats(namespace, UmsProtocolType.DATA_INCREMENT_DATA.toString,
+                        UmsProtocolUtils.feedbackFlowStats(namespace, UmsProtocolType.DATA_INCREMENT_HEARTBEAT.toString,
                           DateUtils.currentDateTime, config.spark_config.stream_id, batchId, sinkNamespace, topics,
                           0, umsTs, currentTs, currentTs, currentTs, currentTs, currentTs,
                           currentTs.toString, flowConfig.flowId), Some(UmsProtocolType.FEEDBACK_FLOW_STATS + "." + flowConfig.flowId),

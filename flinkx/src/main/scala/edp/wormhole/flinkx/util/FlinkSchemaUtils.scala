@@ -38,7 +38,7 @@ import org.apache.kafka.clients.consumer.{ConsumerRecord, ConsumerRecords}
 import org.apache.log4j.Logger
 
 import scala.collection.mutable
-import scala.collection.mutable.ListBuffer
+import scala.collection.Map
 
 object FlinkSchemaUtils extends java.io.Serializable {
 
@@ -156,14 +156,15 @@ object FlinkSchemaUtils extends java.io.Serializable {
     })
   }
 
-  def getSchemaFromZk(zkAddress: String, realZkPath: String): String = {
-    val schemaGetFromZk: String = new String(WormholeZkClient.getData(zkAddress, realZkPath))
-    WormholeZkClient.closeZkClient()
-    schemaGetFromZk
-  }
-
-  def findJsonSchema(config: WormholeFlinkxConfig, zkAddress: String, zkPath: String, sourceNamespace: String): UmsSchema = {
-    val consumer = WormholeKafkaConsumer.initConsumer(config.kafka_input.kafka_base_config.brokers, config.kafka_input.kafka_base_config.group_id, None, config.kerberos)
+  /**
+   * In order to find the correct umsSchema
+   * The function need to read from kafka to find the corresponding sourceNamespace data
+   * @param config
+   * @param sourceNamespace
+   * @return
+   */
+  def findUmsSchemaFromKafka(config: WormholeFlinkxConfig, sourceNamespace: String): UmsSchema = {
+    val consumer = WormholeKafkaConsumer.initConsumer(config.kafka_input.kafka_base_config.brokers, config.kafka_input.kafka_base_config.group_id, None, config.kafka_input.kafka_base_config.kerberos)
     WormholeKafkaConsumer.subscribeTopicFromOffset(consumer, new WormholeFlinkxConfigUtils(config).getTopicOffsetMap)
     var correctData = false
     var record: UmsSchema = null
@@ -193,13 +194,12 @@ object FlinkSchemaUtils extends java.io.Serializable {
         } else logger.debug("continue")
       }
     } catch {
-      case e: Throwable => logger.error("findJsonSchema", e)
+      case e: Throwable => logger.error("findUmsSchemaFromKafka", e)
     }
 
     WormholeKafkaConsumer.close(consumer)
     val umsSchema: UmsSchema = record
-    //    WormholeZkClient.createAndSetData(zkAddress, zkPath, jsonSchema.getBytes("UTF-8"))
-    //    WormholeZkClient.closeZkClient()
+
     umsSchema
   }
 
@@ -295,7 +295,7 @@ object FlinkSchemaUtils extends java.io.Serializable {
       case _=>DateUtils.dt2sqlDate(value.asInstanceOf[Date])
     }
     case Types.SQL_TIMESTAMP => value.asInstanceOf[Timestamp]
-    case Types.DECIMAL => new java.math.BigDecimal(value.asInstanceOf[java.math.BigDecimal].toPlainString.trim).stripTrailingZeros()
+    case Types.DECIMAL => new java.math.BigDecimal(value.asInstanceOf[java.math.BigDecimal].stripTrailingZeros().toPlainString)
     case _ => throw new UnsupportedOperationException(s"Unknown Type: $flinkType")
   }
 

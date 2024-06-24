@@ -23,6 +23,7 @@ package edp.wormhole.externalclient.hadoop
 
 import java.io._
 import java.net.URI
+import java.nio.charset.StandardCharsets
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
@@ -306,6 +307,20 @@ trait HdfsUtils {
 
 
   def writeString(conf: Configuration, obj: String, hdfsUrl: String): Unit = {
+    //   val conf = new Configuration()
+    conf.setBoolean("fs.hdfs.impl.disable.cache", true)
+    val fs = FileSystem.newInstance(conf)
+    val path = new Path(hdfsUrl)
+
+    val content = obj.getBytes(StandardCharsets.UTF_8)
+    val output = fs.create(path)
+    output.write(content)
+    output.close()
+    fs.close()
+  }
+
+
+  def writeStringByOutputStream(conf: Configuration, obj: String, hdfsUrl: String): Unit = {
     //   val conf = new Configuration()
     conf.setBoolean("fs.hdfs.impl.disable.cache", true)
     val fs = FileSystem.newInstance(conf)

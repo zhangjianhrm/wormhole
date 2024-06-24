@@ -33,8 +33,8 @@ import org.apache.flink.types.Row
 import org.apache.kudu.client.KuduTable
 import org.apache.log4j.Logger
 
-import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
+import scala.collection.{Map, mutable}
 
 object LookupKuduHelper extends java.io.Serializable {
 
@@ -78,7 +78,7 @@ object LookupKuduHelper extends java.io.Serializable {
       //value
       val sourceTableFields: Array[String] = if (swiftsSql.sourceTableFields.isDefined) swiftsSql.sourceTableFields.get else null
       val lookupTableFields = if (swiftsSql.lookupTableFields.isDefined) swiftsSql.lookupTableFields.get else null
-      val joinFieldsValueArray: Array[Any] = LookupHelper.joinFieldsInRow(row, lookupTableFields, sourceTableFields, preSchemaMap)
+      val joinFieldsValueArray: Array[Any] = LookupHelper.joinFieldsInRow(row, lookupTableFields, sourceTableFields, preSchemaMap, false)
       val joinFieldsValueString: Array[String] = joinFieldsValueArray.map(value => value.toString)
       val tableSchemaInKudu = KuduConnection.getAllFieldsKuduTypeMap(table)
       val queryResult: (String, Map[String, (Any, String)]) = KuduConnection.doQueryByKey(lookupTableFields, joinFieldsValueString.toList, tableSchemaInKudu, client, table, selectFields)

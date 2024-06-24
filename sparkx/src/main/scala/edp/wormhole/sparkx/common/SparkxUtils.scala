@@ -21,12 +21,12 @@ package edp.wormhole.sparkx.common
 
 import java.sql.Timestamp
 
-import com.alibaba.fastjson.{JSONArray, JSONObject}
+import com.alibaba.fastjson.{JSON, JSONObject}
 import edp.wormhole.common.feedback.FeedbackPriority
 import edp.wormhole.common.json.{FieldInfo, JsonParseUtils}
 import edp.wormhole.kafka.WormholeKafkaProducer
-import edp.wormhole.sparkx.memorystorage.ConfMemoryStorage
 import edp.wormhole.sparkx.spark.log.EdpLogging
+import edp.wormhole.sparkxinterface.swifts.{KafkaKeyConfig, StreamSpecialConfig, WormholeConfig}
 import edp.wormhole.ums.UmsProtocolType.UmsProtocolType
 import edp.wormhole.ums._
 import edp.wormhole.util.DateUtils
@@ -54,23 +54,25 @@ object SparkxUtils extends EdpLogging{
                           errorPattern:String): Unit ={
 
     val ts: String = null
-    val tmpJsonArray = new JSONArray()
-    val sourceTopicSet = mutable.HashSet.empty[String]
-    sourceTopicSet ++= incrementTopicList
-    sourceTopicSet ++= ConfMemoryStorage.initialTopicSet
-    sourceTopicSet.foreach(topic=>{
-      tmpJsonArray.add(topicPartitionOffset.getJSONObject(topic))
-    })
-    logInfo(s"incrementTopicList:${incrementTopicList},initialTopicSet:${ConfMemoryStorage.initialTopicSet},sourceTopicSet:${sourceTopicSet},tmpJsonArray:${tmpJsonArray}")
+    val errorMaxLength = 2000
+//    val tmpJsonArray = new JSONArray()
+//    val sourceTopicSet = mutable.HashSet.empty[String]
+//    sourceTopicSet ++= incrementTopicList
+//    sourceTopicSet ++= ConfMemoryStorage.initialTopicSet
+//    sourceTopicSet.foreach(topic=>{
+//      tmpJsonArray.add(topicPartitionOffset.getJSONObject(topic))
+//    })
+//    logInfo(s"incrementTopicList:${incrementTopicList},initialTopicSet:${ConfMemoryStorage.initialTopicSet},sourceTopicSet:${sourceTopicSet},tmpJsonArray:${tmpJsonArray}")
 
     val errorMsg = if(error!=null){
       val first = if(error.getStackTrace!=null&&error.getStackTrace.nonEmpty) error.getStackTrace.head.toString else ""
-      error.toString + "\n" + first
+      val errorAll = error.toString + "\n" + first
+      errorAll.substring(0, math.min(errorMaxLength, errorAll.length))
     } else null
     WormholeKafkaProducer.sendMessage(config.kafka_output.feedback_topic_name,
       FeedbackPriority.feedbackPriority, UmsProtocolUtils.feedbackFlowError(sourceNamespace,
         config.spark_config.stream_id, DateUtils.currentDateTime, sinkNamespace, UmsWatermark(ts),
-        UmsWatermark(ts), errorCount, errorMsg, batchId, tmpJsonArray.toJSONString,protocolType.replaceAll("\"",""),
+        UmsWatermark(ts), errorCount, errorMsg, batchId, topicPartitionOffset.toJSONString,protocolType.replaceAll("\"",""),
         flowId,errorPattern),
       Some(UmsProtocolType.FEEDBACK_FLOW_ERROR + "." + flowId),
       config.kafka_output.brokers)
@@ -91,6 +93,11 @@ object SparkxUtils extends EdpLogging{
       //if (row.get(i) == null) "''"  // join fields cannot be null
       if (row.get(i) == null) null
       else "'" + row.get(i) + "'"
+      /*else {
+        if(schema(i).dataType.toString.equals("StringType") && row.get(i).toString.contains("'")) {
+          "'" + row.get(i).toString.replace("'", "\\\'") + "'"
+        } else "'" + row.get(i) + "'"
+      }*/
     } else row.get(i)
   }
 
@@ -360,5 +367,79 @@ object SparkxUtils extends EdpLogging{
   //    }
   //    realKey
   //  }
+   def getDefaultKeyConfig(specialConfig: Option[StreamSpecialConfig]): Boolean = {
+    //log.info(s"stream special config is $specialConfig")
+    try {
+      specialConfig match {
+        case Some(_) =>
+          specialConfig.get.useDefaultKey.getOrElse(false)
+        case None =>
+          false
+      }
+    } catch {
+      case e: Throwable =>
+        log.error("parse stream specialConfig error, ", e)
+        false
+    }
+  }
+
+  def getDefaultKey(key: String, topic: String, namespaces: Set[String], kafkaKeyConfig: Option[KafkaKeyConfig]): String = {
+    val renameKey =
+      if(kafkaKeyConfig.isDefined) {
+        if (kafkaKeyConfig.get.useDefaultKey.getOrElse(false) && null != namespaces && namespaces.nonEmpty) {
+          UmsProtocolType.DATA_INCREMENT_DATA.toString + "." + namespaces.head
+        } else {
+          val renameTopicKeyMap = kafkaKeyConfig.get.renameTopicKeyMap.getOrElse(Map())
+          val renameElementKeyMap = kafkaKeyConfig.get.renameElementKeyMap.getOrElse(Map())
+          if (renameTopicKeyMap.contains(topic)) {
+            renameTopicKeyMap.getOrElse(topic, key)
+          } else {
+            renameElementKeyMap.getOrElse((topic, key), key)
+          }
+        }
+      } else {
+        key
+      }
+    log.debug(s"original key is $key, rename key is $renameKey")
+    renameKey
+  }
+
+  def isRightKey(key: String): Boolean = {
+    if(null == key || key.isEmpty) {
+      false
+    } else {
+      if(key.split(".").length < 5) {
+        false
+      } else {
+        true
+      }
+    }
+  }
+
+  def getKafkaKeyConfig(streamSpecialConfig: Option[StreamSpecialConfig]): Option[KafkaKeyConfig] = {
+    if(streamSpecialConfig.isDefined) {
+      val configGet = streamSpecialConfig.get
+      if(configGet.renameKeyConfig.isDefined) {
+        val keyConfig = configGet.renameKeyConfig.get
+        val renameTopicKeyMap = mutable.HashMap[String, String]()
+        val renameElementKeyMap = mutable.HashMap[(String, String), String]()
+        keyConfig.foreach(key => {
+          if(key.originKey.isDefined) {
+            renameElementKeyMap((key.topicName, key.originKey.get)) = key.renameKey
+          } else {
+            renameTopicKeyMap(key.topicName) = key.renameKey
+          }
+        })
+        Some(KafkaKeyConfig(configGet.useDefaultKey, Some(renameTopicKeyMap.toMap), Some(renameElementKeyMap.toMap)))
+
+      } else {
+        Some(KafkaKeyConfig(configGet.useDefaultKey, None, None))
+      }
+    } else {
+      None
+    }
+  }
+
+
 
 }

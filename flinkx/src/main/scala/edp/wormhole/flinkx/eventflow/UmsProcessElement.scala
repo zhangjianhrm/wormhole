@@ -22,7 +22,7 @@ import org.apache.flink.types.Row
 import org.apache.flink.util.Collector
 import org.apache.log4j.Logger
 import org.joda.time.DateTime
-
+import scala.collection.{Map, mutable}
 import scala.collection.mutable.ArrayBuffer
 
 class UmsProcessElement(sourceSchemaMap: Map[String, (TypeInformation[_], Int)],
@@ -48,7 +48,7 @@ class UmsProcessElement(sourceSchemaMap: Map[String, (TypeInformation[_], Int)],
   override def processElement(value: (String, String, String, Int, Long),
                               ctx: ProcessFunction[(String, String, String, Int, Long), Row]#Context,
                               out: Collector[Row]): Unit = {
-    logger.info("in UmsProcessElement source data from kafka " + value._2)
+    logger.debug("in UmsProcessElement source data from kafka " + value._2)
     try {
       val (protocolType, namespace) = UmsCommonUtils.getTypeNamespaceFromKafkaKey(value._1)
       if (config.feedback_enabled) startMetricsMoinitoring(protocolType.toString)
